@@ -1,1 +1,1 @@
-@time f(Jaccard(2), x, y)
+@time f(Winkler(Jaro()), x, y; min_dist = 0.9)
