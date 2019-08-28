@@ -4,13 +4,10 @@
 ## Hamming
 ##
 ##############################################################################
-function evaluate(dist::Hamming, s1::AbstractString, s2::AbstractString;
-    max_dist = max(length(s1), length(s2)))
+function evaluate(dist::Hamming, s1::AbstractString, s2::AbstractString)
     current = abs(length(s2) - length(s1))
-    current >= max_dist && return max_dist
     for (ch1, ch2) in zip(s1, s2)
         current += ch1 != ch2
-        current >= max_dist && return max_dist
     end
     return current
 end
@@ -39,12 +36,12 @@ struct Jaro <: SemiMetric end
 function evaluate(dist::Jaro, s1::AbstractString, s2::AbstractString)
     s1, s2 = reorder(s1, s2)
     len1, len2 = length(s1), length(s2)
-    maxdist = max(0, div(len2, 2) - 1)
     # if both are empty, m = 0 so should be 1.0 according to wikipedia. Add this line so that not the case
     len2 == 0 && return 0.0
+    maxdist = max(0, div(len2, 2) - 1)
     flag = fill(false, len2)
     prevstate1 = firstindex(s1)
-    i1_match = prevstate1 * ones(Int, len1)
+    i1_match = fill(prevstate1, len1)
     #  m counts number matching characters
     m = 0 
     i1 = 1
@@ -61,9 +58,9 @@ function evaluate(dist::Jaro, s1::AbstractString, s2::AbstractString)
         i2curr = i2
         x2curr = x2
         while x2curr !== nothing
-            (i2curr > i1 + maxdist) && break
+            i2curr > i1 + maxdist && break
             ch2, state2 = x2curr
-            if (ch1 == ch2) & !flag[i2curr] 
+            if (ch1 == ch2) && !flag[i2curr] 
                 m += 1
                 flag[i2curr] = true
                 i1_match[m] = prevstate1
@@ -96,6 +93,10 @@ end
 ##
 ## Levenshtein
 ##
+## Return max_dist +1 if distance higher than max_dist
+## This makes it possible to differentiate distance equalt to max_dist vs strictly higher
+## This is important for find_all
+##
 ##############################################################################
 """
     Levenshtein()
@@ -108,13 +109,13 @@ struct Levenshtein <: SemiMetric end
 
 ## Source: http://blog.softwx.net/2014/12/optimizing-levenshtein-algorithm-in-c.html
 function evaluate(dist::Levenshtein, s1::AbstractString, s2::AbstractString;
-    max_dist = max(length(s1), length(s2)))
+    max_dist = nothing)
     s1, s2 = reorder(s1, s2)
     len1, len2 = length(s1), length(s2)
-    len2 - len1 >= max_dist && return max_dist
+    max_dist !== nothing && len2 - len1 > max_dist && return max_dist + 1
     # prefix common to both strings can be ignored
     k, x1, x2start = remove_prefix(s1, s2)
-    (x1 == nothing) && return len2 - k
+    x1 == nothing && return len2 - k
     # distance initialized to first row of matrix
     # => distance between "" and s2[1:i}
     v0 = collect(1:(len2 - k))
@@ -132,7 +133,6 @@ function evaluate(dist::Levenshtein, s1::AbstractString, s2::AbstractString;
             #  update
             above, current, left = current, left, v0[i2]
             if ch1 != ch2
-                # substitution
                 current = min(current + 1, above + 1, left + 1)
             end
             min_dist = min(min_dist, left)
@@ -140,11 +140,12 @@ function evaluate(dist::Levenshtein, s1::AbstractString, s2::AbstractString;
             x2 = iterate(s2, state2)
             i2 += 1
         end
-        min_dist >= max_dist && return max_dist
+        max_dist !== nothing && min_dist > max_dist && return max_dist + 1
         x1 = iterate(s1, state1)
         i1 += 1
     end
-    return min(current, max_dist)
+    max_dist !== nothing && current > max_dist && return max_dist + 1 
+    return current
 end
 
 ##############################################################################
@@ -163,15 +164,20 @@ struct DamerauLevenshtein <: SemiMetric end
 
 ## http://blog.softwx.net/2015/01/optimizing-damerau-levenshtein_15.html
 function evaluate(dist::DamerauLevenshtein, s1::AbstractString, s2::AbstractString;
-    max_dist = max(length(s1), length(s2)))
+    max_dist = nothing)
     s1, s2 = reorder(s1, s2)
     len1, len2 = length(s1), length(s2)
-    len2 - len1 >= max_dist && return max_dist
+    max_dist !== nothing && len2 - len1 > max_dist && return max_dist + 1
     # prefix common to both strings can be ignored
     k, x1, x2start = remove_prefix(s1, s2)
     (x1 == nothing) && return len2 - k
     v0 = collect(1:(len2 - k))
     v2 = similar(v0)
+    if max_dist !== nothing
+        offset = 1 + max_dist - (len2 - len1)
+        i2_start = 1
+        i2_end = max_dist
+    end
     i1 = 1
     current = i1
     prevch1, = x1
@@ -181,48 +187,53 @@ function evaluate(dist::DamerauLevenshtein, s1::AbstractString, s2::AbstractStri
         current = i1 
         nextTransCost = 0
         prevch2, = x2start
+        if max_dist !== nothing
+            i2_start += (i1 > offset) ? 1 : 0
+            i2_end = min(i2_end + 1, len2)
+        end
         x2 = x2start
         i2 = 1
         while x2 !== nothing
             ch2, state2 = x2
-            above = current
-            thisTransCost = nextTransCost
-            nextTransCost = v2[i2]
-            # cost of diagonal (substitution)
-            v2[i2] = current = left
-            # left now equals current cost (which will be diagonal at next iteration)
-            left = v0[i2]
-            if ch1 != ch2
-                # insertion
-                if left < current
-                    current = left
-                end
-                # deletion
-                if above < current
-                    current = above
-                end
-                current += 1
-                if (i1 != 1) & (i2 != 1) & (ch1 == prevch2) & (prevch1 == ch2)
-                    thisTransCost += 1
-                    if thisTransCost < current
-                        current = thisTransCost
+            if max_dist == nothing || (i2_start <= i2 <= i2_end)
+                above = current
+                thisTransCost = nextTransCost
+                nextTransCost = v2[i2]
+                # cost of diagonal (substitution)
+                v2[i2] = current = left
+                # left now equals current cost (which will be diagonal at next iteration)
+                left = v0[i2]
+                if ch1 != ch2
+                    # insertion
+                    if left < current
+                        current = left
+                    end
+                    # deletion
+                    if above < current
+                        current = above
+                    end
+                    current += 1
+                    if (i1 != 1) & (i2 != 1) & (ch1 == prevch2) & (prevch1 == ch2)
+                        thisTransCost += 1
+                        if thisTransCost < current
+                            current = thisTransCost
+                        end
                     end
                 end
+                v0[i2] = current
             end
-            v0[i2] = current
             x2 = iterate(s2, state2)
             i2 += 1
             prevch2 = ch2
         end
-        (v0[i1 + len2 - len1] >= max_dist) && return max_dist
+        max_dist !== nothing && v0[i1 + len2 - len1] > max_dist && return max_dist + 1
         x1 = iterate(s1, state1)
         i1 += 1
         prevch1 = ch1
     end
+    max_dist !== nothing && current > max_dist && return max_dist + 1
     return current
 end
-
-
 
 
 ##############################################################################
